@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
 """
-Simple Architecture Job Scraper
---------------------------------
-This script gathers job ads posted by architecture firms in specified U.S. towns.
-It outputs an Excel file with:
+Archinect Job Scraper (Debug Mode)
+---------------------------------
+This script fetches architecture job listings from Archinect for a given set of U.S. towns.
+It logs debug info and saves results to an Excel file with columns:
 
   • firm_name
   • role_title
   • phone
   • website
 
-Dependencies (all free):
+Dependencies:
   requests
   beautifulsoup4
   pandas
   openpyxl
 
-Quick start:
+Usage:
   python3 -m venv venv
   source venv/bin/activate
-  pip install --upgrade pip
   pip install requests beautifulsoup4 pandas openpyxl
-  python scrapperv1.py
+  python scrapper_simple.py
 """
 
 import re
@@ -34,16 +33,15 @@ import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 
-# -----------------------------------------------
-# Configuration
-# -----------------------------------------------
-# List the towns you want to check (City, State)
+# ---------------- Configuration ----------------
+# Specify the city,state pairs you want to scrape
 LOCATIONS: List[Tuple[str, str]] = [
     ("Fort Worth", "TX"),
     ("Bozeman", "MT"),
     ("Asheville", "NC"),
-    # add more entries here
+    # add more towns here
 ]
+
 OUTPUT_FILE = Path("architecture_jobs.xlsx")
 HEADERS = {
     "User-Agent": (
@@ -53,10 +51,8 @@ HEADERS = {
     )
 }
 PHONE_RE = re.compile(r"(?:\(\d{3}\)\s?|\b\d{3}[\-\.\s])\d{3}[\-\.\s]\d{4}\b")
+TIMEOUT = 10  # seconds for HTTP requests
 
-# -----------------------------------------------
-# Data class
-# -----------------------------------------------
 @dataclass
 class JobRow:
     firm_name: str
@@ -67,90 +63,68 @@ class JobRow:
     def to_dict(self):
         return asdict(self)
 
-# -----------------------------------------------
-# Helper function to extract phone & site
-# -----------------------------------------------
+# -------------- Helper Functions --------------
 def get_contact_info(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """Fetch phone and website from a job page."""
     phone = None
     site = None
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
         soup = BeautifulSoup(r.text, "html.parser")
         text = soup.get_text(" ", strip=True)
         m = PHONE_RE.search(text)
         if m:
             phone = m.group()
+        # find first external link
         for a in soup.find_all("a", href=True):
-            h = a["href"]
-            if h.startswith("http") and "@" not in h and not h.startswith("mailto"):
-                site = h
+            href = a["href"]
+            if href.startswith("http") and "@" not in href and not href.startswith("mailto"):
+                site = href
                 break
     except Exception as e:
-        print(f"Contact fetch error {url}: {e}", file=sys.stderr)
+        print(f"Contact fetch error for {url}: {e}", file=sys.stderr)
     return phone, site
 
-# -----------------------------------------------
-# Scraper functions
-# -----------------------------------------------
+# ------------- Scraper Function -------------
 def scrape_archinect(city: str, state: str) -> List[JobRow]:
     rows: List[JobRow] = []
     url = f"https://archinect.com/jobs/{state}/{city.replace(' ', '-') }"
+    print(f"Fetching Archinect URL: {url}", file=sys.stderr)
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        print(f"Status code: {r.status_code}", file=sys.stderr)
         soup = BeautifulSoup(r.text, "html.parser")
-        for card in soup.select(".job-listing"):
-            t1 = card.select_one(".job-listing-title")
-            t2 = card.select_one(".job-position")
-            if not (t1 and t2):
+        cards = soup.select(".job-listing")
+        print(f"Found {len(cards)} listings on Archinect for {city}, {state}", file=sys.stderr)
+        for card in cards:
+            title_tag = card.select_one(".job-listing-title")
+            role_tag = card.select_one(".job-position")
+            if not (title_tag and role_tag):
                 continue
+            firm = title_tag.get_text(strip=True)
+            role = role_tag.get_text(strip=True)
             link = "https://archinect.com" + card.a["href"]
-            ph, site = get_contact_info(link)
-            rows.append(JobRow(t1.get_text(strip=True), t2.get_text(strip=True), ph, site))
+            phone, site = get_contact_info(link)
+            print(f"  - {firm}: {role} (contacted)", file=sys.stderr)
+            rows.append(JobRow(firm, role, phone, site))
     except Exception as e:
-        print(f"Archinect error {city}, {state}: {e}", file=sys.stderr)
+        print(f"Error scraping Archinect for {city}, {state}: {e}", file=sys.stderr)
     return rows
 
-
-def scrape_aia(city: str, state: str) -> List[JobRow]:
-    rows: List[JobRow] = []
-    url = "https://careercenter.aia.org/jobs/"
-    try:
-        r = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=20,
-            params={"keywords": "", "location": f"{city}, {state}"},
-        )
-        soup = BeautifulSoup(r.text, "html.parser")
-        for card in soup.select("article.job-listing"):
-            n = card.select_one(".job-listing__info--name")
-            r2 = card.select_one(".job-listing__info--title")
-            if not (n and r2):
-                continue
-            link = card.select_one("a")["href"]
-            ph, site = get_contact_info(link)
-            rows.append(JobRow(n.get_text(strip=True), r2.get_text(strip=True), ph, site))
-    except Exception as e:
-        print(f"AIA error {city}, {state}: {e}", file=sys.stderr)
-    return rows
-
-# -----------------------------------------------
-# Main
-# -----------------------------------------------
+# ------------------ Main ------------------
 def main():
     all_jobs: List[JobRow] = []
     for city, state in LOCATIONS:
-        print(f"Scraping {city}, {state}…", file=sys.stderr)
-        all_jobs.extend(scrape_archinect(city, state))
-        all_jobs.extend(scrape_aia(city, state))
+        print(f"\nScraping {city}, {state}" + "="*20, file=sys.stderr)
+        jobs = scrape_archinect(city, state)
+        all_jobs.extend(jobs)
     if not all_jobs:
-        print("No jobs found.", file=sys.stderr)
+        print("No jobs collected.", file=sys.stderr)
         return
-    df = pd.DataFrame([j.to_dict() for j in all_jobs])
+    df = pd.DataFrame([job.to_dict() for job in all_jobs])
     df.drop_duplicates(subset=["firm_name", "role_title"], inplace=True)
     df.to_excel(OUTPUT_FILE, index=False)
-    print(f"Saved {len(df)} jobs to {OUTPUT_FILE}", file=sys.stderr)
-
+    print(f"\nSaved {len(df)} job rows to {OUTPUT_FILE}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
